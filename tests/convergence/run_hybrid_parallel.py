@@ -12,6 +12,7 @@ from pipegoose.distributed.parallel_context import ParallelContext
 from pipegoose.distributed.parallel_mode import ParallelMode
 from pipegoose.nn import DataParallel, TensorParallel
 from pipegoose.optim import DistributedOptimizer
+from logger import Logger
 
 
 def get_model_params_size(model, fp_bytes=4):
@@ -30,7 +31,7 @@ def set_seed(seed):
 if __name__ == "__main__":
     import wandb
 
-    DATA_PARALLEL_SIZE = 2
+    DATA_PARALLEL_SIZE = 1
     TENSOR_PARALLEL_SIZE = 2
     PIPELINE_PARALLEL_SIZE = 1
     MODEL = "bigscience/bloom-560m"
@@ -44,17 +45,18 @@ if __name__ == "__main__":
     torch.cuda.empty_cache()
     set_seed(SEED)
 
-    print(f"device_count: {torch.cuda.device_count()}")
-    print(f"is available: {torch.cuda.is_available()}")
+    Logger()(f"device_count: {torch.cuda.device_count()}")
+    Logger()(f"is available: {torch.cuda.is_available()}")
 
     parallel_context = ParallelContext.from_torch(
         data_parallel_size=DATA_PARALLEL_SIZE,
         tensor_parallel_size=TENSOR_PARALLEL_SIZE,
         pipeline_parallel_size=PIPELINE_PARALLEL_SIZE,
     )
+
     rank = parallel_context.get_global_rank()
 
-    print(f"rank={rank}, initialized parallel_context")
+    Logger()(f"rank={rank}, initialized parallel_context")
 
     train_dataset = load_dataset("imdb", split="train[:130]")
     train_dataset = train_dataset.map(lambda x: {"text": x["text"][:10]})  # for demonstration purposes
@@ -76,7 +78,7 @@ if __name__ == "__main__":
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-    print(f"rank={rank}, model size before parallelizing: {round(get_model_params_size(model), 3)} GB")
+    Logger()(f"rank={rank}, model size before parallelizing: {round(get_model_params_size(model), 3)} GB")
 
     dist.barrier()
 
@@ -84,11 +86,11 @@ if __name__ == "__main__":
     model = DataParallel(model, parallel_context).parallelize()
     optim = SGD(model.parameters(), lr=LR)
     optim = DistributedOptimizer(optim, parallel_context)
-    model.to("cuda")
+    # model.to("cuda")
     device = next(model.parameters()).device
 
-    print(f"rank={rank}, model size after parallelizing: {round(get_model_params_size(model), 3)} GB")
-    print(f"rank={rank}, model is moved to device: {device}")
+    Logger()(f"rank={rank}, model size after parallelizing: {round(get_model_params_size(model), 3)} GB")
+    Logger()(f"rank={rank}, model is moved to device: {device}")
 
     ref_model.to(device)
     if DATA_PARALLEL_SIZE > 1:
@@ -127,7 +129,7 @@ if __name__ == "__main__":
 
     for epoch in range(NUM_EPOCHS):
         train_sampler.set_epoch(epoch)
-        print(f"rank={rank}, epoch={epoch}")
+        Logger()(f"rank={rank}, epoch={epoch}")
 
         for batch in train_dataloader:
             inputs = tokenizer(batch["text"], padding=True, truncation=True, max_length=CONTEXT_LENGTH, return_tensors="pt")
@@ -145,34 +147,47 @@ if __name__ == "__main__":
             ref_outputs.loss.backward()
             ref_optim.step()
 
-            print(f"epoch={epoch}, step={step}, rank={rank}, train_loss={outputs.loss}, ref_train_loss={ref_outputs.loss}")
+            if rank == 0 and (step == 6 or step == 7):
+                # Save model 
+                torch.save(model.state_dict(), f"model_{epoch}_{step}.pt")
+                torch.save(ref_model.state_dict(), f"ref_model_{epoch}_{step}.pt")
+
+                # Save optimizer
+                torch.save(optim.state_dict(), f"optim_{epoch}_{step}.pt")
+                torch.save(ref_optim.state_dict(), f"ref_optim_{epoch}_{step}.pt")
+
+                # Save current data batch
+                torch.save(inputs, f"inputs_{epoch}_{step}.pt")
+                torch.save(labels, f"labels_{epoch}_{step}.pt")
+
+                Logger()(f"epoch={epoch}, step={step}, rank={rank}, train_loss={outputs.loss}, ref_train_loss={ref_outputs.loss}")
 
             if rank == 0:
                 wandb.log({"train_loss": outputs.loss, "ref_train_loss": ref_outputs.loss, "step": step, "epoch": epoch})
 
             step += 1
 
-    model.eval()
-    ref_model.eval()
+    # model.eval()
+    # ref_model.eval()
     dist.barrier()
 
-    step = 0
-    val_sampler.set_epoch(1)
+    # step = 0
+    # val_sampler.set_epoch(1)
 
-    for batch in val_dataloader:
-        inputs = tokenizer(batch["text"], padding=True, truncation=True, max_length=CONTEXT_LENGTH, return_tensors="pt")
-        inputs = {name: tensor.to(device) for name, tensor in inputs.items()}
-        labels = inputs["input_ids"]
+    # for batch in val_dataloader:
+    #     inputs = tokenizer(batch["text"], padding=True, truncation=True, max_length=CONTEXT_LENGTH, return_tensors="pt")
+    #     inputs = {name: tensor.to(device) for name, tensor in inputs.items()}
+    #     labels = inputs["input_ids"]
 
-        outputs = model(**inputs, labels=labels)
-        ref_outputs = ref_model(**inputs, labels=labels)
+    #     outputs = model(**inputs, labels=labels)
+    #     ref_outputs = ref_model(**inputs, labels=labels)
 
-        print(f"rank={rank}, val_loss={outputs.loss}, ref_val_loss={ref_outputs.loss}, step={step}")
+    #     print(f"rank={rank}, val_loss={outputs.loss}, ref_val_loss={ref_outputs.loss}, step={step}")
 
-        if rank == 0:
-            wandb.log({"val_loss": outputs.loss, "ref_val_loss": ref_outputs.loss, "step": step})
+    #     if rank == 0:
+    #         wandb.log({"val_loss": outputs.loss, "ref_val_loss": ref_outputs.loss, "step": step})
 
-        step += 1
+    #     step += 1
 
     wandb.finish()
     model.cpu()
