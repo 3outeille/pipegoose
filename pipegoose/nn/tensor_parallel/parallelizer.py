@@ -48,6 +48,10 @@ class ModuleParallelizer(ABC):
     @abstractclassmethod
     def is_parallelizable(self):
         raise NotImplementedError
+    
+    @abstractclassmethod
+    def is_deparallelizable(self):
+        raise NotImplementedError
 
     @abstractclassmethod
     def parallelize(self):
@@ -113,12 +117,16 @@ class LinearParallelizer(ModuleParallelizer):
 
 class EmbeddingParallelizer(ModuleParallelizer):
     @staticmethod
-    def is_parallelizable(module_name: str, module: nn.Module) -> bool:
+    def is_parallelizable(module: nn.Module) -> bool:
         return isinstance(module, nn.Embedding)
+    
+    @staticmethod
+    def is_deparallelizable(module: nn.Module) -> bool:
+        return isinstance(module, ParallelEmbedding)
 
     def parallelize(self) -> ParallelEmbedding:
         """Parallelize nn.Embedding module."""
-        assert self.is_parallelizable(self.module_name, self.module), f"{self.module_name} can't be parallelized"
+        assert self.is_parallelizable(self.module), f"{self.module_name} can't be parallelized"
 
         module = self.module
         self._resize_vocab_size(module)
@@ -127,6 +135,19 @@ class EmbeddingParallelizer(ModuleParallelizer):
         return module
 
     def deparallelize(self):
+        """"De-parallelize nn.Embedding module."""
+        assert self.is_deparallelizable(self.module), f"{self.module_name} was not firt parallelized"
+        module = self.module
+        self._concat_weight(module)
+        return module
+    
+    def _concat_weight(self, module: nn.Module):
+        rank = self.parallel_context.get_local_rank(ParallelMode.TENSOR)
+        world_size = self.parallel_context.get_world_size(ParallelMode.TENSOR)
+
+        # vocab_start_idx, vocab_end_idx = VocabUtility.get_vocab_range_from_global_vocab_size(world_size, rank, vocab_size)
+
+        # create weight tensor with same shape as module.weight
         pass
 
     def _split_weight(self, module: nn.Module):
