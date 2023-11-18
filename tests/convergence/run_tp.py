@@ -11,7 +11,14 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 from pipegoose.distributed.parallel_context import ParallelContext
 from pipegoose.distributed.parallel_mode import ParallelMode
 from pipegoose.nn import TensorParallel
+from pipegoose.utils.logger import Logger
+from transformers import BloomForCausalLM, BloomConfig
+import random
+import numpy as np
+import os
+import torch.nn as nn
 
+from local_model import GPT
 
 def get_model_params_size(model, fp_bytes=4):
     params_size = 0
@@ -21,10 +28,14 @@ def get_model_params_size(model, fp_bytes=4):
     return params_gb
 
 
-def set_seed(seed):
+def seed_everything(seed: int):
+    random.seed(seed)
+    os.environ['PYTHONHASHSEED'] = str(seed)
+    np.random.seed(seed)
     torch.manual_seed(seed)
-    torch.cuda.manual_seed_all(seed)
-
+    torch.cuda.manual_seed(seed)
+    torch.backends.cudnn.deterministic = True
+    torch.backends.cudnn.benchmark = True
 
 if __name__ == "__main__":
     import wandb
@@ -32,7 +43,8 @@ if __name__ == "__main__":
     DATA_PARALLEL_SIZE = 1
     TENSOR_PARALLEL_SIZE = 2
     PIPELINE_PARALLEL_SIZE = 1
-    MODEL = "bigscience/bloom-560m"
+    # MODEL = "bigscience/bloom-560m"
+    MODEL = "gpt2-large"
     DATASET = "imdb"
     NUM_EPOCHS = 4
     LR = 1e-3
@@ -41,10 +53,10 @@ if __name__ == "__main__":
     CONTEXT_LENGTH = 1024
 
     torch.cuda.empty_cache()
-    set_seed(SEED)
+    seed_everything(SEED)
 
-    print(f"device_count: {torch.cuda.device_count()}")
-    print(f"is available: {torch.cuda.is_available()}")
+    Logger()(f"device_count: {torch.cuda.device_count()}")
+    Logger()(f"is available: {torch.cuda.is_available()}")
 
     parallel_context = ParallelContext.from_torch(
         data_parallel_size=DATA_PARALLEL_SIZE,
@@ -53,10 +65,13 @@ if __name__ == "__main__":
     )
     rank = parallel_context.get_global_rank()
 
-    print(f"rank={rank}, initialized parallel_context")
+    Logger()(f"rank={rank}, initialized parallel_context")
 
     train_dataset = load_dataset("imdb", split="train[:130]")
     train_dataset = train_dataset.map(lambda x: {"text": x["text"][:10]})  # for demonstration purposes
+    # train_dataset = load_dataset("imdb", split="train[:1]")
+    # train_dataset = train_dataset.map(lambda x: {"text": "I rented I"})
+    # train_dataloader = DataLoader(train_dataset, batch_size=1, shuffle=False)
 
     dp_rank = parallel_context.get_local_rank(ParallelMode.DATA)
     train_sampler = DistributedSampler(train_dataset, num_replicas=DATA_PARALLEL_SIZE, rank=dp_rank, seed=SEED)
@@ -77,13 +92,21 @@ if __name__ == "__main__":
         sampler=val_sampler,
     )
 
-    model = AutoModelForCausalLM.from_pretrained(MODEL)
+    # model = AutoModelForCausalLM.from_pretrained(MODEL)
+    model_config = BloomConfig.from_pretrained("bigscience/bloom-560m")
+    model = BloomForCausalLM(model_config)
+    if rank == 0:
+        model = TensorParallel(model, parallel_context).parallelize()
+        Logger()(model)
+        del model
+    model = GPT.from_pretrained(MODEL)
     ref_model = deepcopy(model)
+
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.add_special_tokens({"pad_token": "[PAD]"})
 
-    print(f"rank={rank}, model size before parallelizing: {round(get_model_params_size(model), 3)} GB")
+    Logger()(f"rank={rank}, model size before parallelizing: {round(get_model_params_size(model), 3)} GB")
 
     dist.barrier()
 
@@ -94,8 +117,8 @@ if __name__ == "__main__":
     model.to("cuda")
     device = next(model.parameters()).device
 
-    print(f"rank={rank}, model size after parallelizing: {round(get_model_params_size(model), 3)} GB")
-    print(f"rank={rank}, model is moved to device: {device}")
+    Logger()(f"rank={rank}, model size after parallelizing: {round(get_model_params_size(model), 3)} GB")
+    Logger()(f"rank={rank}, model is moved to device: {device}")
 
     ref_model.to(device)
     # if DATA_PARALLEL_SIZE > 1:
@@ -134,7 +157,7 @@ if __name__ == "__main__":
 
     for epoch in range(NUM_EPOCHS):
         train_sampler.set_epoch(epoch)
-        print(f"rank={rank}, epoch={epoch}")
+        Logger()(f"rank={rank}, epoch={epoch}")
 
         for batch in train_dataloader:
             inputs = tokenizer(
@@ -158,7 +181,7 @@ if __name__ == "__main__":
             ref_outputs.loss.backward()
             ref_optim.step()
 
-            print(f"epoch={epoch}, step={step}, rank={rank}, train_loss={outputs.loss}, ref_train_loss={ref_outputs.loss}")
+            Logger()(f"epoch={epoch}, step={step}, rank={rank}, train_loss={outputs.loss}, ref_train_loss={ref_outputs.loss}")
 
             if rank == 0:
                 wandb.log(
@@ -193,7 +216,7 @@ if __name__ == "__main__":
         outputs = model(**inputs, labels=labels)
         ref_outputs = ref_model(**inputs, labels=labels)
 
-        print(f"rank={rank}, val_loss={outputs.loss}, ref_val_loss={ref_outputs.loss}, step={step}")
+        Logger()(f"rank={rank}, val_loss={outputs.loss}, ref_val_loss={ref_outputs.loss}, step={step}")
 
         if rank == 0:
             wandb.log(
