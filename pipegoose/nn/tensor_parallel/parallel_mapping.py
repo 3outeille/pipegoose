@@ -34,6 +34,10 @@ class ParallelMapping:
             Row(("mlp.dense_4h_to_h", "self_attention.dense")),
             LMHead(("lm_head",)),
         ],
+        "gpt2-large": [
+            Column(("attn.c_attn", "mlp.c_fc")),
+            Row(("attn.c_proj", "mlp.c_proj"))
+        ]
     }
 
     @staticmethod

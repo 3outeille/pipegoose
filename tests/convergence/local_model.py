@@ -15,31 +15,6 @@ import torch
 import torch.nn as nn
 from torch.nn import functional as F
 
-class Conv1D(nn.Module):
-    # https://github.com/huggingface/transformers/blob/main/src/transformers/pytorch_utils.py
-    """
-    1D-convolutional layer as defined by Radford et al. for OpenAI GPT (and also used in GPT-2).
-
-    Basically works like a linear layer but the weights are transposed.
-
-    Args:
-        nf (`int`): The number of output features.
-        nx (`int`): The number of input features.
-    """
-
-    def __init__(self, nf, nx):
-        super().__init__()
-        self.nf = nf
-        self.weight = nn.Parameter(torch.empty(nx, nf))
-        self.bias = nn.Parameter(torch.zeros(nf))
-        nn.init.normal_(self.weight, std=0.02)
-
-    def forward(self, x):
-        size_out = x.size()[:-1] + (self.nf,)
-        x = torch.addmm(self.bias, x.view(-1, x.size(-1)), self.weight)
-        x = x.view(size_out)
-        return x
-
 class LayerNorm(nn.Module):
     """ LayerNorm but with an optional bias. PyTorch doesn't support simply bias=False """
 
@@ -57,12 +32,10 @@ class CausalSelfAttention(nn.Module):
         super().__init__()
         assert config.n_embd % config.n_head == 0
         # key, query, value projections for all heads, but in a batch
-        # self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
-        self.c_attn = Conv1D(3 * config.n_embd, config.n_embd)
+        self.c_attn = nn.Linear(config.n_embd, 3 * config.n_embd, bias=config.bias)
 
         # output projection
-        # self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
-        self.c_proj = Conv1D(config.n_embd, config.n_embd)
+        self.c_proj = nn.Linear(config.n_embd, config.n_embd, bias=config.bias)
 
         # regularization
         self.attn_dropout = nn.Dropout(config.dropout)
@@ -196,24 +169,24 @@ class GPT(nn.Module):
         elif isinstance(module, nn.Embedding):
             torch.nn.init.normal_(module.weight, mean=0.0, std=0.02)
 
-    def forward(self, idx, targets=None):
-        device = idx.device
-        b, t = idx.size()
+    def forward(self, input_ids, attention_mask=None, labels=None):
+        device = input_ids.device
+        b, t = input_ids.size()
         assert t <= self.config.block_size, f"Cannot forward sequence of length {t}, block size is only {self.config.block_size}"
         pos = torch.arange(0, t, dtype=torch.long, device=device) # shape (t)
 
         # forward the GPT model itself
-        tok_emb = self.transformer.wte(idx) # token embeddings of shape (b, t, n_embd)
+        tok_emb = self.transformer.wte(input_ids) # token embeddings of shape (b, t, n_embd)
         pos_emb = self.transformer.wpe(pos) # position embeddings of shape (t, n_embd)
         x = self.transformer.drop(tok_emb + pos_emb)
         for block in self.transformer.h:
             x = block(x)
         x = self.transformer.ln_f(x)
 
-        if targets is not None:
-            # if we are given some desired targets also calculate the loss
+        if labels is not None:
+            # if we are given some desired labels also calculate the loss
             logits = self.lm_head(x)
-            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), targets.view(-1), ignore_index=-1)
+            loss = F.cross_entropy(logits.view(-1, logits.size(-1)), labels.view(-1), ignore_index=-1)
         else:
             # inference-time mini-optimization: only forward the lm_head on the very last position
             logits = self.lm_head(x[:, [-1], :]) # note: using list [-1] to preserve the time dim
@@ -271,8 +244,7 @@ class GPT(nn.Module):
         sd_keys_hf = sd_hf.keys()
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.masked_bias')] # ignore these, just a buffer
         sd_keys_hf = [k for k in sd_keys_hf if not k.endswith('.attn.bias')] # same, just the mask (buffer)
-        # transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
-        transposed = ['mlp.c_fc.weight', 'mlp.c_proj.weight']
+        transposed = ['attn.c_attn.weight', 'attn.c_proj.weight', 'mlp.c_fc.weight', 'mlp.c_proj.weight']
         # basically the openai checkpoints use a "Conv1D" module, but we only want to use a vanilla Linear
         # this means that we have to transpose these weights when we import them
         assert len(sd_keys_hf) == len(sd_keys), f"mismatched keys: {len(sd_keys_hf)} != {len(sd_keys)}"
@@ -358,6 +330,3 @@ class GPT(nn.Module):
             idx = torch.cat((idx, idx_next), dim=1)
 
         return idx
-
-if __name__ == '__main__':
-    model = GPT.from_pretrained("gpt2-large")

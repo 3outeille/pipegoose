@@ -93,12 +93,8 @@ if __name__ == "__main__":
     )
 
     # model = AutoModelForCausalLM.from_pretrained(MODEL)
-    model_config = BloomConfig.from_pretrained("bigscience/bloom-560m")
-    model = BloomForCausalLM(model_config)
-    if rank == 0:
-        model = TensorParallel(model, parallel_context).parallelize()
-        Logger()(model)
-        del model
+    # model_config = BloomConfig.from_pretrained("bigscience/bloom-560m")
+    # model = BloomForCausalLM(model_config)
     model = GPT.from_pretrained(MODEL)
     ref_model = deepcopy(model)
 
@@ -111,6 +107,7 @@ if __name__ == "__main__":
     dist.barrier()
 
     model = TensorParallel(model, parallel_context).parallelize()
+
     # model = DataParallel(model, parallel_context).parallelize()
     optim = SGD(model.parameters(), lr=LR)
     # optim = DistributedOptimizer(optim, parallel_context)
