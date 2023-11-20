@@ -42,11 +42,11 @@ def seed_everything(seed: int):
 if __name__ == "__main__":
     import wandb
 
-    DATA_PARALLEL_SIZE = 1
+    DATA_PARALLEL_SIZE = 2
     TENSOR_PARALLEL_SIZE = 2
     PIPELINE_PARALLEL_SIZE = 1
-    # MODEL = "bigscience/bloom-560m"
-    MODEL = "gpt2-large"
+    MODEL = "bigscience/bloom-560m"
+    # MODEL = "gpt2-large"
     DATASET = "imdb"
     NUM_EPOCHS = 4
     LR = 1e-3
@@ -95,9 +95,9 @@ if __name__ == "__main__":
     )
 
     # model = AutoModelForCausalLM.from_pretrained(MODEL)
-    # model_config = BloomConfig.from_pretrained("bigscience/bloom-560m")
-    # model = BloomForCausalLM(model_config)
-    model = GPT(config=GPTConfig(n_layer=36, n_head=20, n_embd=1280))
+    model_config = BloomConfig.from_pretrained(MODEL)
+    model = BloomForCausalLM(model_config)
+    # model = GPT(config=GPTConfig(n_layer=36, n_head=20, n_embd=1280))
     ref_model = deepcopy(model)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -112,7 +112,7 @@ if __name__ == "__main__":
     model = DataParallel(model, parallel_context).parallelize()
     optim = SGD(model.parameters(), lr=LR)
     optim = DistributedOptimizer(optim, parallel_context)
-    model.to("cuda")
+    # model.to("cuda")
     device = next(model.parameters()).device
 
     Logger()(f"rank={rank}, model size after parallelizing: {round(get_model_params_size(model), 3)} GB")
@@ -120,7 +120,7 @@ if __name__ == "__main__":
 
     ref_model.to(device)
     if DATA_PARALLEL_SIZE > 1:
-        ref_model = torch.nn.parallel.DistributedDataParallel(ref_model, device_ids=[device])
+        ref_model = torch.nn.parallel.DistributedDataParallel(ref_model)
 
     ref_optim = SGD(ref_model.parameters(), lr=LR)
 
