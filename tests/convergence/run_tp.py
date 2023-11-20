@@ -10,7 +10,9 @@ from transformers import AutoModelForCausalLM, AutoTokenizer
 
 from pipegoose.distributed.parallel_context import ParallelContext
 from pipegoose.distributed.parallel_mode import ParallelMode
-from pipegoose.nn import TensorParallel
+from pipegoose.nn import TensorParallel, DataParallel
+from pipegoose.optim import DistributedOptimizer
+
 from pipegoose.utils.logger import Logger
 from transformers import BloomForCausalLM, BloomConfig
 import random
@@ -18,7 +20,7 @@ import numpy as np
 import os
 import torch.nn as nn
 
-from local_model import GPT
+from local_model import GPT, GPTConfig
 
 def get_model_params_size(model, fp_bytes=4):
     params_size = 0
@@ -95,7 +97,7 @@ if __name__ == "__main__":
     # model = AutoModelForCausalLM.from_pretrained(MODEL)
     # model_config = BloomConfig.from_pretrained("bigscience/bloom-560m")
     # model = BloomForCausalLM(model_config)
-    model = GPT.from_pretrained(MODEL)
+    model = GPT(config=GPTConfig(n_layer=36, n_head=20, n_embd=1280))
     ref_model = deepcopy(model)
 
     tokenizer = AutoTokenizer.from_pretrained(MODEL)
@@ -107,10 +109,9 @@ if __name__ == "__main__":
     dist.barrier()
 
     model = TensorParallel(model, parallel_context).parallelize()
-
-    # model = DataParallel(model, parallel_context).parallelize()
+    model = DataParallel(model, parallel_context).parallelize()
     optim = SGD(model.parameters(), lr=LR)
-    # optim = DistributedOptimizer(optim, parallel_context)
+    optim = DistributedOptimizer(optim, parallel_context)
     model.to("cuda")
     device = next(model.parameters()).device
 
@@ -118,8 +119,8 @@ if __name__ == "__main__":
     Logger()(f"rank={rank}, model is moved to device: {device}")
 
     ref_model.to(device)
-    # if DATA_PARALLEL_SIZE > 1:
-    #     ref_model = torch.nn.parallel.DistributedDataParallel(ref_model, device_ids=[device])
+    if DATA_PARALLEL_SIZE > 1:
+        ref_model = torch.nn.parallel.DistributedDataParallel(ref_model, device_ids=[device])
 
     ref_optim = SGD(ref_model.parameters(), lr=LR)
 
